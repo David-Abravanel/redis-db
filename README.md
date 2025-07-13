@@ -58,7 +58,7 @@ await db.start()
 
 ```python
 # Save a new user
-user = db.Users(name="Alice", email="alice@example.com", age=30)
+user = Users(name="Alice", email="alice@example.com", age=30)
 await user.save()
 
 # Get by ID
