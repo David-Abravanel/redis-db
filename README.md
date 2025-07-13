@@ -39,7 +39,7 @@ class Users(RedisBaseModel):
 from redisorm import RedisDB
 
 class DB(RedisDB):
-    Users = Users  # Capitalized to match class name
+    users = Users
 
 db = DB(
     host='localhost',
@@ -62,13 +62,13 @@ user = Users(name="Alice", email="alice@example.com", age=30)
 await user.save()
 
 # Get by ID
-retrieved = await db.Users.get(user.id)
+retrieved = await db.users.get(user.id)
 
 # Update specific fields
-await db.Users.update(user.id, age=31)
+await db.users.update(user.id, age=31)
 
 # Delete
-await db.Users.delete(user.id)
+await db.users.delete(user.id)
 ```
 
 ---
