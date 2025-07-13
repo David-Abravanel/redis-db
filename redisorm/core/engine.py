@@ -174,7 +174,7 @@ class RedisDB:
         Register a model class (table) with this RedisDB instance.
         
         Args:
-            model_cls: Model class derived from AsyncRedisBaseModel
+            model_cls: Model class derived from RedisBaseModel
         """
         key_prefix = model_cls.get_key_prefix()
         self.tables[key_prefix] = model_cls

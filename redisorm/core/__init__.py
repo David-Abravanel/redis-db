@@ -1,2 +1,2 @@
 from .engine import RedisDB
-from .model import AsyncRedisBaseModel
+from .model import RedisBaseModel

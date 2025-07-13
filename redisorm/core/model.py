@@ -9,10 +9,10 @@ from pydantic import BaseModel
 
 from .engine import RedisDB
 
-T = TypeVar('T', bound='AsyncRedisBaseModel')
+T = TypeVar('T', bound='RedisBaseModel')
 
 
-class AsyncRedisBaseModel(BaseModel):
+class RedisBaseModel(BaseModel):
     """
     Base model for Redis hash-based storage using Pydantic and redis.asyncio.
     

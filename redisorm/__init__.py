@@ -1,1 +1,1 @@
-from .core import RedisDB, AsyncRedisBaseModel
+from .core import RedisDB, RedisBaseModel
