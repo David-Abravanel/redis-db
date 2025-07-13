@@ -204,6 +204,28 @@ class RedisBaseModel(BaseModel):
         if return_updated:
             return await cls.get(id, include_meta=include_meta)
         return None
+    
+    @classmethod
+    async def create(cls: Type[T], obj: T | dict, *, exp: Optional[int] = None) -> T:
+        """
+        Create and save a new instance to Redis.
+        Accepts either a dict or a model instance.
+        Automatically validates the input and handles meta.
+        """
+        if isinstance(obj, dict):
+            instance = cls.model_validate(obj)
+        elif isinstance(obj, cls):
+            instance = obj
+        else:
+            raise TypeError(f"create() expected dict or {cls.__name__} instance, got {type(obj)}")
+
+        # Set expiration if passed
+        if exp is not None:
+            instance._meta.exp = exp
+
+        await instance.save()
+        return instance
+
 
     def __repr__(self):
         fields = self.model_dump(exclude_none=True)
