@@ -1,4 +1,4 @@
-# redisdb/core/model.py
+# Optimized redisdb/core/model.py
 import asyncio
 import re
 import json
@@ -33,6 +33,7 @@ class RedisBaseModel(BaseModel):
     _include_meta_for_repr: bool = PrivateAttr(default=False)
 
     _redis: ClassVar[Optional[Redis]] = None
+    _type_hints_cache: ClassVar[Dict[str, Any]] = {}
 
     class Meta:
         key_prefix: ClassVar[Optional[str]] = None
@@ -53,6 +54,9 @@ class RedisBaseModel(BaseModel):
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
+        # Cache type hints for performance
+        cls._type_hints_cache = get_type_hints(cls)
+        
         if RedisDB._instance is None:
             RedisDB._instance = RedisDB()
         RedisDB._instance.add_table(cls)
@@ -87,13 +91,15 @@ class RedisBaseModel(BaseModel):
         meta_data = self._meta.model_dump(exclude_none=True)
         combined = {**model_data, **meta_data}
         
-        serialized = {
-            k: orjson.dumps(v).decode("utf-8") if isinstance(v, (dict, list)) else str(v)
-            for k, v in combined.items()
-        }
+        # Optimized serialization - avoid encoding simple types
+        serialized = {}
+        for k, v in combined.items():
+            if isinstance(v, (dict, list)):
+                serialized[k] = orjson.dumps(v).decode("utf-8")
+            else:
+                serialized[k] = str(v)
 
         return key, serialized
-
 
     @classmethod
     def _prepare_update_data(cls, fields: dict) -> Dict[str, str]:
@@ -114,7 +120,7 @@ class RedisBaseModel(BaseModel):
     @classmethod
     def _parse_redis_data(cls, raw_data: dict) -> Tuple[dict, MetaFields]:
         decoded = {k.decode(): v.decode() for k, v in raw_data.items()}
-        type_hints = get_type_hints(cls)
+        type_hints = cls._type_hints_cache  # Use cached type hints
         model_data = {}
         meta_data = {}
 
@@ -124,13 +130,13 @@ class RedisBaseModel(BaseModel):
             else:
                 if type_hints.get(k) in (dict, list):
                     try:
-                        model_data[k] = json.loads(v)
-                    except json.JSONDecodeError:
+                        model_data[k] = orjson.loads(v)  # Use orjson for faster parsing
+                    except (orjson.JSONDecodeError, ValueError):
                         model_data[k] = v
                 else:
                     model_data[k] = v
 
-        for field in MetaFields.__fields__:
+        for field in MetaFields.model_fields:
             if field not in meta_data:
                 meta_data[field] = None
 
@@ -162,13 +168,11 @@ class RedisBaseModel(BaseModel):
             resolved_ids = []
             async for key in redis_conn.scan_iter(match=pattern):
                 key_str = key.decode() if isinstance(key, bytes) else key
-                # חילוץ ה-id מה-key (נניח שהפורמט הוא prefix:id)
                 parts = key_str.split(":")
                 if len(parts) != 2:
                     continue
                 candidate_id = parts[1]
 
-                # סינון לפי regex של UUID
                 if UUID_REGEX.match(candidate_id):
                     resolved_ids.append(candidate_id)
         elif isinstance(ids, str):
@@ -182,6 +186,41 @@ class RedisBaseModel(BaseModel):
     def _get_index_key(cls, field: str, value: Any) -> str:
         return f"{cls.get_key_prefix()}:by_{field}:{value}"
 
+    # @classmethod
+    # async def _batch_index_fields(cls, instances: List[T]) -> None:
+    #     """Optimized batch indexing for multiple instances"""
+    #     redis = cls.get_redis()
+    #     prefix = cls.get_key_prefix()
+        
+    #     indexable_fields = getattr(getattr(cls, "Meta", None), "indexable_fields", None)
+    #     type_hints = cls._type_hints_cache
+
+    #     async with redis.pipeline(transaction=False) as pipe:
+    #         for instance in instances:
+    #             for field, typ in type_hints.items():
+    #                 if field.startswith("_") or field == "id":
+    #                     continue
+                    
+    #                 if indexable_fields is not None and field not in indexable_fields:
+    #                     continue
+
+    #                 if typ not in (str, int, float, bool):
+    #                     continue
+                    
+    #                 value = getattr(instance, field, None)
+    #                 if value is None:
+    #                     continue
+
+    #                 if isinstance(value, (str, int, float, bool)):
+    #                     set_key = f"{prefix}:by_{field}:{value}"
+    #                     pipe.sadd(set_key, instance.id)
+
+    #                 if isinstance(value, (int, float)):
+    #                     z_key = f"{prefix}:z_by_{field}"
+    #                     pipe.zadd(z_key, {instance.id: float(value)})
+
+    #         await pipe.execute()
+
     @classmethod
     async def _index_fields(cls, instance: T, pipe: Optional[Pipeline] = None) -> None:
         redis = cls.get_redis()
@@ -190,8 +229,9 @@ class RedisBaseModel(BaseModel):
         prefix = cls.get_key_prefix()
         
         indexable_fields = getattr(getattr(cls, "Meta", None), "indexable_fields", None)
+        type_hints = cls._type_hints_cache
 
-        for field, typ in get_type_hints(cls).items():
+        for field, typ in type_hints.items():
             if field.startswith("_") or field == "id":
                 continue
             
@@ -216,13 +256,14 @@ class RedisBaseModel(BaseModel):
         if pipe is not None and not isinstance(pipe, Pipeline):
             await pipe.execute()
 
-
     @classmethod
     async def _remove_from_indexes(cls, instance: T) -> None:
         redis_conn = cls.get_redis()
         simple_types = (str, int, float, bool)
+        type_hints = cls._type_hints_cache
+        
         async with redis_conn.pipeline(transaction=True) as pipe:
-            for field_name, field_type in get_type_hints(cls).items():
+            for field_name, field_type in type_hints.items():
                 value = getattr(instance, field_name, None)
                 if value is not None and isinstance(value, simple_types):
                     index_key = cls._get_index_key(field_name, value)
@@ -231,7 +272,7 @@ class RedisBaseModel(BaseModel):
 
     @classmethod
     def _cast_partial_fields(cls, raw_data: Dict[str, Any]) -> Dict[str, Any]:
-        type_hints = get_type_hints(cls)
+        type_hints = cls._type_hints_cache
         parsed = {}
 
         for field, val in raw_data.items():
@@ -248,7 +289,7 @@ class RedisBaseModel(BaseModel):
                 elif typ == bool:
                     parsed[field] = val.lower() in ("true", "1", "yes")
                 elif typ in (dict, list):
-                    parsed[field] = json.loads(val)
+                    parsed[field] = orjson.loads(val)  # Use orjson
                 else:
                     parsed[field] = val
             except Exception:
@@ -314,6 +355,7 @@ class RedisBaseModel(BaseModel):
         redis_conn = cls.get_redis()
         ids = await cls._resolve_ids(ids)
 
+        # Batch Redis operations
         async with redis_conn.pipeline(transaction=False) as pipe:
             for id_ in ids:
                 key = f"{cls.get_key_prefix()}:{id_}"
@@ -347,11 +389,12 @@ class RedisBaseModel(BaseModel):
             if include_meta:
                 ttl_val = results[i * step + 1]
                 meta.exp = ttl_val if isinstance(ttl_val, int) and ttl_val >= 0 else None
+                
             if fields is not None:
                 instance = cls.model_construct(**model_data)
             else:
                 instance = cls.model_validate(model_data)
-            instance.id = id_  # חשוב בשאילתות לפי fields
+            instance.id = id_
             instance._meta = meta
             instance._include_meta_for_repr = include_meta
             output.append(instance)
@@ -373,7 +416,7 @@ class RedisBaseModel(BaseModel):
             pipe.delete(*full_keys)
             results = await pipe.execute()
 
-        deleted_count = results[-1]  # delete returns count of deleted keys
+        deleted_count = results[-1]
         if len(ids) == 1:
             return deleted_count == 1
         else:
@@ -384,7 +427,8 @@ class RedisBaseModel(BaseModel):
         cls: Type[T],
         items: Union[T, dict, List[Union[T, dict]]],
         *,
-        exp: Optional[int] = None
+        exp: Optional[int] = None,
+        batch_size: int = 1000  # Add batch processing
     ) -> Union[T, List[T]]:
         if not isinstance(items, list):
             items = [items]
@@ -392,39 +436,45 @@ class RedisBaseModel(BaseModel):
         else:
             return_single = False
 
-        # --- step 1: validation ---
-        t0 = time.perf_counter()
+        # Process in batches for very large datasets
+        all_instances = []
+        for i in range(0, len(items), batch_size):
+            batch = items[i:i + batch_size]
+            batch_instances = await cls._create_batch(batch, exp=exp)
+            all_instances.extend(batch_instances)
+
+        return all_instances[0] if return_single else all_instances
+
+    @classmethod
+    async def _create_batch(
+        cls: Type[T],
+        items: List[Union[T, dict]],
+        *,
+        exp: Optional[int] = None
+    ) -> List[T]:
+        # Validation
         instances: List[T] = []
         for item in items:
             instance = cls.model_validate(item) if isinstance(item, dict) else item
             if exp is not None:
                 instance._meta.exp = exp
             instances.append(instance)
-        print("validate:", time.perf_counter() - t0)
 
-        # --- step 2: serialization ---
-        t1 = time.perf_counter()
+        # Batch serialization
         serialized_items = [inst._serialize_data() for inst in instances]
-        print("serialize:", time.perf_counter() - t1)
 
-        # --- step 3: sending to Redis ---
-        t2 = time.perf_counter()
+        # Batch Redis operations
         redis_conn = cls.get_redis()
         async with redis_conn.pipeline(transaction=False) as pipe:
-            for (inst, (key, data)) in zip(instances, serialized_items):
+            for inst, (key, data) in zip(instances, serialized_items):
                 pipe.hmset(key, data)
                 if inst._meta.exp:
                     pipe.expire(key, inst._meta.exp)
             await pipe.execute()
-        print("redis write:", time.perf_counter() - t2)
 
-        # --- step 4: indexing ---
-        t3 = time.perf_counter()
+        # Index fields after creation
         await asyncio.gather(*[cls._index_fields(inst) for inst in instances])
-        print("indexing:", time.perf_counter() - t3)
-
-        return instances[0] if return_single else instances
-
+        return instances
 
     async def save(self) -> None:
         redis_conn = self.get_redis()
@@ -433,7 +483,6 @@ class RedisBaseModel(BaseModel):
         if self._meta.exp:
             await redis_conn.expire(key, self._meta.exp)
         await self.__class__._index_fields(self)
-
 
     def __repr__(self):
         fields = self.model_dump(exclude_none=True)
