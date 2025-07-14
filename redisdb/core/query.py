@@ -126,6 +126,44 @@ class RedisQuerySet(Generic[T]):
         end_index = start_index + self.limit_count if self.limit_count is not None else None
 
         return filtered_objects[start_index:end_index]
+    
+    async def count(self) -> int:
+        """Count matching objects without retrieving them."""
+        # For count, we only need IDs
+        redis_connection = self.model_class.get_redis()
+        key_prefix = self.model_class.get_key_prefix()
+        
+        simple_eq_filters = {
+            key: val for key, val in self.filters.items()
+            if "__" not in key or key.endswith("__eq")
+        }
+        
+        if not simple_eq_filters:
+            # Count all keys
+            pattern = f"{key_prefix}:*"
+            count = 0
+            async for key in redis_connection.scan_iter(match=pattern):
+                count += 1
+            return count
+        
+        # Use intersection for count
+        sets_of_ids = []
+        for filter_key, filter_value in simple_eq_filters.items():
+            field, _ = split_filter_key(filter_key)
+            index_key = f"{key_prefix}:by_{field}:{filter_value}"
+            cardinality = await redis_connection.scard(index_key)
+            if cardinality == 0:
+                return 0
+            sets_of_ids.append(index_key)
+        
+        if len(sets_of_ids) == 1:
+            return await redis_connection.scard(sets_of_ids[0])
+        
+        # For multiple sets, we need to compute intersection
+        # This is a simplified approach - for exact count with complex filters,
+        # we'd need to retrieve and filter
+        matched_ids = await self._get_indexed_ids(key_prefix, simple_eq_filters, {})
+        return len(matched_ids)
 
     async def first(self) -> Optional[T]:
         self.limit(1)

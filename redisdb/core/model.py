@@ -154,7 +154,7 @@ class RedisBaseModel(BaseModel):
             await redis_conn.expire(key, self._meta.exp)
 
     @classmethod
-    async def _resolve_ids(cls, ids: Union[str, List[str], None]) -> List[str]:
+    async def _resolve_ids(cls, ids: Union[str, List[str], None], length: int = None) -> List[str]:
         redis_conn = cls.get_redis()
 
         if ids is None:
@@ -162,15 +162,15 @@ class RedisBaseModel(BaseModel):
             resolved_ids = []
             async for key in redis_conn.scan_iter(match=pattern):
                 key_str = key.decode() if isinstance(key, bytes) else key
-                # חילוץ ה-id מה-key (נניח שהפורמט הוא prefix:id)
                 parts = key_str.split(":")
                 if len(parts) != 2:
                     continue
                 candidate_id = parts[1]
-
-                # סינון לפי regex של UUID
                 if UUID_REGEX.match(candidate_id):
                     resolved_ids.append(candidate_id)
+                
+                if length is not None and len(resolved_ids) >= length:
+                    break
         elif isinstance(ids, str):
             resolved_ids = [ids]
         else:
@@ -309,10 +309,11 @@ class RedisBaseModel(BaseModel):
         cls: Type[T],
         ids: Union[str, List[str], None] = None,
         include_meta: bool = False,
-        fields: Optional[List[str]] = None
+        fields: Optional[List[str]] = None,
+        limit: Optional[int] = None
     ) -> Union[Optional[T], List[Optional[T]]]:
         redis_conn = cls.get_redis()
-        ids = await cls._resolve_ids(ids)
+        ids = await cls._resolve_ids(ids, length=limit)
 
         async with redis_conn.pipeline(transaction=False) as pipe:
             for id_ in ids:
