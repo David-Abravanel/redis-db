@@ -253,7 +253,7 @@ class RedisBaseModel(BaseModel):
                 z_key = f"{prefix}:z_by_{field}"
                 pipe.zadd(z_key, {instance.id: float(value)})
 
-        if pipe is not None and not isinstance(pipe, Pipeline):
+        if pipe is not None and isinstance(pipe, Pipeline):
             await pipe.execute()
 
     @classmethod
