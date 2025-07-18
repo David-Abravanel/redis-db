@@ -1,1 +1,1 @@
-from .type_registry import TypeRegistry
+from .type_registry import TypeRegistry, compile_validator, is_optional_type
